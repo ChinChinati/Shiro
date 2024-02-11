@@ -4,8 +4,24 @@ import numpy as np
 from numpy import interp
 from time import time
 from pynput import keyboard
+import socket
+import select
+from threading import Thread
+HEADER_LENGTH = 10
 
+# defining the IP address and Port Number.
+IP = "172.17.104.180"
+PORT = 8000
 
+server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server_socket.bind((IP, PORT))
+server_socket.listen()
+sockets_list = [server_socket]
+
+clients = {}
+
+print(f'Listening for connections on IP = {IP} at PORT = {PORT}')
 
 #Robot Pose
 x,y,z,roll,pitch,yaw = 0,0,0,0,0,0
@@ -253,55 +269,6 @@ class Doggy(object):
     
     def stand(self,height=250):
         self.move(self.move_xyz([0,0,height,0,0,height,0,0,height,0,0,height]))
-
-    # interval: seconds ;
-    # def walk_old(self,interval,walkingHeight = 300,roll=0,pitch=0,STEP_TIME = 250, precision=0.1):
-    #     self.enable_torque()
-    #     self.pid(1900,4000,50)#new pid values
-    #     i = walkingHeight
-    #     self.set_time(2000)
-    #     self.move(self.move_xyz([0,0,i,0,0,i,0,0,i,0,0,i]))
-
-    #     t = 0
-    #     global offset_x,offset_y,offset_z
-    #     offset_x = 0
-    #     offset_y = 0
-    #     offset_z = walkingHeight
-
-    #     time_changed = 0
-    #     now = time()
-    #     while (time() - now) < interval:
-
-    #         x1,y1,z1 = traj(t)
-    #         x2,y2,z2 = traj(t+2)
-    #         x3,y3,z3 = traj(t+1)
-    #         x4,y4,z4 = traj(t+3)
-    #         if t%4 >= 0 and t%4 <= 1:
-    #             r_x1,r_y1,r_z1,r_x2,r_y2,r_z2,r_x3,r_y3,r_z3,r_x4,r_y4,r_z4 = rotation(+roll,-pitch,0)
-    #         elif t%4 > 1 and t%4 <= 2:
-    #             r_x1,r_y1,r_z1,r_x2,r_y2,r_z2,r_x3,r_y3,r_z3,r_x4,r_y4,r_z4 = rotation(+roll,+pitch,0)
-    #         elif t%4 > 2 and t%4 <= 3:
-    #             r_x1,r_y1,r_z1,r_x2,r_y2,r_z2,r_x3,r_y3,r_z3,r_x4,r_y4,r_z4 = rotation(-roll,-pitch,0)
-    #         elif t%4 > 3 and t%4 <= 4:
-    #             r_x1,r_y1,r_z1,r_x2,r_y2,r_z2,r_x3,r_y3,r_z3,r_x4,r_y4,r_z4 = rotation(-roll,+pitch,0)
-
-        #     self.move(self.move_xyz([offset_x+r_x1+x1,  offset_y+r_y1+y1,   offset_z+r_z1+z1,
-        #                             offset_x+x2+r_x2,    offset_y+y2+r_y2,   offset_z+z2+r_z2,
-        #                             offset_x+x3+r_x3,   -offset_y+y3+r_y3,   offset_z+z3+r_z3,
-        #                             offset_x+x4+r_x4,   -offset_y+y4+r_y4,   offset_z+z4+r_z4]))
-        #     if not time_changed:
-        #         self.set_time(STEP_TIME)
-        #         time_changed = 1
-        #     # t = 0.1 threshold = 50 FAST STEP_TIME = 90 #fastest
-        #     # t = 0.14 threshold = 50 FAST STEP_TIME = 150
-        #     # t = 0.1  threshold = 20 SLOW STEP_TIME = 150
-        #     print(250)
-        #     t += precision
-            
-        # self.set_time(2000)
-        # self.move(REST)
-        # print("Done")
-        # #self.disable_torque()
         
     def walk_trot(self,interval=10,walkingHeight = 300,step_time = 400, step_length = 50,step_height=50, tilt=-5):
         self.enable_torque()
@@ -367,7 +334,314 @@ class Doggy(object):
         print("Done")
     
     tilt = 0
-    def controller(self,walkingHeight = 300,step_time = 100, step_length = 20,step_height=50, tilt=-1): 
+
+
+    def client_server_controller(self,walkingHeight = 300,step_time = 100, step_length = 20,step_height=50, tilt=-1): 
+        self.walkingHeight = walkingHeight
+        step_length = 20
+        step_height = 50
+        step_time = 100
+        self.tilt = tilt
+        t = 0
+        time_changed = 0
+        
+        x1,y1,z1 = 0,0,0
+        x2,y2,z2 = 0,0,0
+        x3,y3,z3 = 0,0,0
+        x4,y4,z4 = 0,0,0
+        
+        self.MODE = 1 # sitting = 0
+                 # standing = 1
+                 # straffing = 2
+                 # rpy while still standing only = 3
+         
+        self.MOVEMENT = 0 # still = 0
+                     # forward = 1
+                     # backward = 2
+                     # left = 3
+                     # right = 4
+                     # right rotation = 5
+                     # left rotation = 6
+
+        self.ESC = 0
+        offset_x = 0
+        offset_y = 0
+        offset_z = self.walkingHeight
+        
+        self.roll = 0
+        self.pitch = 0
+        self.yaw = 0
+
+        # Reading Client Data
+        # A function for handling the received message.
+        def receive_message(client_socket):
+            try:
+                """
+                The received message header contains the message length, its size is defined, and the constant.
+                """
+                message_header = client_socket.recv(HEADER_LENGTH)
+
+                """
+                If the received data has no length then it means that the client has closed the connection. Hence, we will return False as no message was received.
+                """
+                if not len(message_header):
+                    return False
+
+                # Convert header to an int value
+                message_length = int(message_header.decode('utf-8').strip())
+
+                # Returning an object of the message header and the data of the message data.
+                return {'header': message_header, 'data': client_socket.recv(message_length)}
+
+            except:
+                return False
+
+
+        def start_server():
+            client_data = ''
+            while True:
+                # Read the data using a select module from the socketLists.
+                read_sockets, _, exception_sockets = select.select(
+                    sockets_list, [], sockets_list)
+
+                # Iterating over the notified sockets.
+                for notified_socket in read_sockets:
+                    """
+                    If the notified socket is a server socket then we have a new connection, so add it using the accept() method.
+                    """
+                    if notified_socket == server_socket:
+                        client_socket, client_address = server_socket.accept()
+
+                        # Else the client has disconnected before sending his/her name.
+                        user = receive_message(client_socket)
+
+                        # If False - client disconnected before he sent his name
+                        if user is False:
+                            continue
+
+                        # Adding the accepted socket to select.select() list.
+                        sockets_list.append(client_socket)
+
+                        # Also adding the username and username header.
+                        clients[client_socket] = user
+
+                        print('Accepted new connection from {}:{}, username: {}'.format(
+                            *client_address, user['data'].decode('utf-8')))
+
+                    # Else the existing socket is sending a message so handling the existing client.
+                    else:
+                        # Receiving the message.
+                        message = receive_message(notified_socket)
+
+                        # If no message is accepted then finish the connection.
+                        if message is False:
+                            print('Closed connection from: {}'.format(
+                                clients[notified_socket]['data'].decode('utf-8')))
+
+                            # Removing the socket from the list of the socket.socket()
+                            sockets_list.remove(notified_socket)
+
+                            # Removing the user from the list of users.
+                            del clients[notified_socket]
+
+                            continue
+
+                        # Getting the user by using the notified socket, so that the user can be identified.
+                        user = clients[notified_socket]
+
+                        print(f'Received message from {user["data"].decode("utf-8")}: {message["data"].decode("utf-8")}')
+                        client_data = message["data"].decode("utf-8")
+                        
+                        # -------------------------------------------------------------------------------------------------------
+                        #sitting
+                        if client_data == '.':
+                            self.MODE = 0
+                            self.MOVEMENT = 0
+                            print(f'self.MODE:{self.MODE}')
+
+                        #stand
+                        elif client_data == '0':
+                            self.MODE = 1
+                            self.MOVEMENT = 0
+                            self.roll = 0
+                            self.pitch = 0
+                            self.yaw = 0
+                            print(f'self.MODE:{self.MODE}')
+                        
+                        #forward
+                        elif client_data == '8':
+                            # self.stand(walkingHeight)
+                            self.MODE = 2
+                            self.MOVEMENT = 1
+                            print(f'self.MODE:{self.MODE}')
+                        
+                        #backward
+                        elif client_data == '2':
+                            # self.stand(walkingHeight)
+                            self.MODE = 2
+                            self.MOVEMENT = 2
+                        
+                        #right
+                        elif client_data == '6':
+                            # self.stand(walkingHeight)
+                            self.MODE = 2
+                            self.MOVEMENT = 3
+                        
+                        #left
+                        elif client_data == '4':
+                            # self.stand(walkingHeight)
+                            self.MODE = 2
+                            self.MOVEMENT = 4
+                        
+                        #left rotation
+                        elif client_data == '7':
+                            self.MODE = 2
+                            self.MOVEMENT = 5
+                        
+                        #right rotation
+                        elif client_data == '9':
+                            self.MODE = 2
+                            self.MOVEMENT = 6
+                        
+                        #yaw
+                        elif client_data == '+':
+                            self.yaw += 2
+                            self.MODE = 3
+                        elif client_data == '-':
+                            self.yaw -= 2
+                            self.MODE = 3
+
+                        #strafe
+                        elif client_data == '5':
+                            self.MODE = 2
+                            self.MOVEMENT = 0
+                            # print(f'self.MODE:{self.MODE}')
+                        # elif client_data == keyboard.Key.up:
+                        #     self.pitch += 2
+                        #     self.MODE = 3
+                        # elif client_data == keyboard.Key.down:
+                        #     self.pitch -= 2
+                        #     self.MODE = 3
+                        # elif client_data == keyboard.Key.left:
+                        #     self.roll += 2
+                        #     self.MODE = 3
+                        # elif client_data == keyboard.Key.right:
+                        #     self.roll -= 2
+                        #     self.MODE = 3
+                        
+                        else:
+                            pass
+
+                        # Iterating over the connected clients and broadcasting the message.
+                        for client_socket in clients:
+                            # Sending to all except the sender.
+                            if client_socket != notified_socket:
+                                """
+                                Reusing the message header sent by the sender, and saving the username header sent by the user when he/she connected.
+                                """
+                                client_socket.send(
+                                    user['header'] + user['data'] + message['header'] + message['data'])
+                                
+        #Starting server on a thread
+        Thread(target=start_server).start()
+
+        def trajectory(t):
+            X = 0
+            if t >= 4:
+                t = t%4
+            if t == 0:
+                Z = 0
+                Y = step_length
+            elif t == 1:
+                Z = 0
+                # Y = step_length
+                Y = 0
+                # Y = -step_length
+            elif t == 2:
+                Z = 0
+                Y = -step_length
+            elif t == 3:
+                Z = -step_height
+                Y = 0
+            return X,Y,Z
+        
+        self.enable_torque()
+        while not self.ESC:
+            # print(self.MODE)
+            if self.MODE == 0:
+                self.sit()
+                time_changed = 0
+                self.MODE = 4
+            elif self.MODE == 1:
+                self.set_time(300)
+                self.stand(self.walkingHeight)
+                time_changed = 0
+                self.MODE = 4
+            elif self.MODE == 2:
+                if self.MOVEMENT == 1:
+                    x1,y1,z1 = trajectory(t+2)
+                    x2,y2,z2 = trajectory(t)
+                    x3,y3,z3 = trajectory(t)
+                    x4,y4,z4 = trajectory(t+2)
+                elif self.MOVEMENT == 2:
+                    x1,y1,z1 = trajectory(t+2)
+                    x2,y2,z2 = trajectory(t)
+                    x3,y3,z3 = trajectory(t)
+                    x4,y4,z4 = trajectory(t+2)
+                    y1,y2,y3,y4 = -y1,-y2,-y3,-y4
+                elif self.MOVEMENT == 3:
+                    y1,x1,z1 = trajectory(t+2)
+                    y2,x2,z2 = trajectory(t)
+                    y3,x3,z3 = trajectory(t)
+                    y4,x4,z4 = trajectory(t+2)
+                elif self.MOVEMENT == 4:
+                    y1,x1,z1 = trajectory(t+2)
+                    y2,x2,z2 = trajectory(t)
+                    y3,x3,z3 = trajectory(t)
+                    y4,x4,z4 = trajectory(t+2)
+                    x1,x2,x3,x4 = -x1,-x2,-x3,-x4
+                elif self.MOVEMENT == 0:
+                    x1,y1,z1 = trajectory(t+2)
+                    x2,y2,z2 = trajectory(t)
+                    x3,y3,z3 = trajectory(t)
+                    x4,y4,z4 = trajectory(t+2)
+                    y1,y2,y3,y4 = 0,0,0,0
+                elif self.MOVEMENT == 5:
+                    y1,x1,z1 = trajectory(t+2)
+                    y2,x2,z2 = trajectory(t)
+                    y3,x3,z3 = trajectory(t)
+                    y4,x4,z4 = trajectory(t+2)
+                    x1,x2 = -x1,-x2
+                elif self.MOVEMENT == 6:
+                    y1,x1,z1 = trajectory(t+2)
+                    y2,x2,z2 = trajectory(t)
+                    y3,x3,z3 = trajectory(t)
+                    y4,x4,z4 = trajectory(t+2)
+                    x3,x4 = -x3,-x4
+                self.move(self.move_xyz([offset_x+x1,  offset_y+y1,   offset_z+z1+self.tilt,
+                                        offset_x+x2,    offset_y+y2,   offset_z+z2-self.tilt,
+                                        offset_x+x3,   -offset_y+y3,   offset_z+z3+self.tilt,
+                                        offset_x+x4,   -offset_y+y4,   offset_z+z4-self.tilt+2]))
+                if not time_changed:
+                    self.set_time(step_time)
+                    time_changed = 1
+                t += 1
+            elif self.MODE == 3:
+                self.set_time(300)
+                r_x1,r_y1,r_z1,r_x2,r_y2,r_z2,r_x3,r_y3,r_z3,r_x4,r_y4,r_z4 = self.rotation(self.roll,self.pitch,self.yaw)
+                offset_z = self.walkingHeight
+                self.move(self.move_xyz([+r_x1,   +r_y1,  offset_z+r_z1,
+                                +r_x2,   +r_y2,   offset_z+r_z2,
+                                +r_x3,   +r_y3,   offset_z+r_z3,
+                                +r_x4,   +r_y4,   offset_z+r_z4]))
+                time_changed = 0
+                self.MODE = 4
+            else:
+                pass
+        self.sit()
+        print("Done")
+
+    def keyboard_controller(self,walkingHeight = 300,step_time = 100, step_length = 20,step_height=50, tilt=-1): 
         self.walkingHeight = walkingHeight
         step_length = 20
         step_height = 50
@@ -405,15 +679,19 @@ class Doggy(object):
         def on_press(key):
             try:
                 if key.char == '0':
-                    self.MODE = 0
+                    self.MODE = 1
                     self.MOVEMENT = 0
                     # print(f'self.MODE:{self.MODE}')
                 elif key.char == None:
-                    self.MODE = 1
+                    self.MODE = 2
                     self.MOVEMENT = 0
                     self.roll = 0
                     self.pitch = 0
                     self.yaw = 0
+                    # print(f'self.MODE:{self.MODE}')
+                elif key.char == '.':
+                    self.MODE = 0
+                    self.MOVEMENT = 0
                     # print(f'self.MODE:{self.MODE}')
                 elif key.char == '8':
                     # self.stand(walkingHeight)
@@ -572,6 +850,7 @@ class Doggy(object):
         self.sit()
         print("Done")
 
+    
     def rotation(self, r = 0, p = 0, y = 0):
         r_x1,r_y1,r_z1 = 0,0,0
         r_x2,r_y2,r_z2 = 0,0,0
