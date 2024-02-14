@@ -350,7 +350,7 @@ class Doggy(object):
         x3,y3,z3 = 0,0,0
         x4,y4,z4 = 0,0,0
         
-        self.MODE = 1 # sitting = 0
+        self.MODE = 0 # sitting = 0
                  # standing = 1
                  # straffing = 2
                  # rpy while still standing only = 3
