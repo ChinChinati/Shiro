@@ -10,7 +10,7 @@ from threading import Thread
 HEADER_LENGTH = 10
 
 # defining the IP address and Port Number.
-IP = "172.17.104.180"
+#IP = "172.17.104.180"
 PORT = 8000
 
 server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -268,6 +268,7 @@ class Doggy(object):
         self.move(REST)
     
     def stand(self,height=250):
+        self.set_time(3000)
         self.move(self.move_xyz([0,0,height,0,0,height,0,0,height,0,0,height]))
         
     def walk_trot(self,interval=10,walkingHeight = 300,step_time = 400, step_length = 50,step_height=50, tilt=-5):
