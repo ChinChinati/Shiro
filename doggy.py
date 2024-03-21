@@ -11,6 +11,7 @@ HEADER_LENGTH = 10
 
 # defining the IP address and Port Number.
 #IP = "172.17.104.180"
+IP = '192.168.24.226'
 PORT = 8000
 
 server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
